@@ -3,9 +3,12 @@ export type AppConfig = {
   shortDescription?: string;
 
   version: string;
+  releaseDate?: string;
   publisher: string;
   AppPublisherURL?: string;
   appId: string;
+  /** The site to open after installation.  Required exe to support --open-site flag. */
+  openSite?: boolean;
   /** Directory from where files will be copied to the installation directory. */
   sourceFilesDir: string;
   /** Path to the main executable in the source directory. */

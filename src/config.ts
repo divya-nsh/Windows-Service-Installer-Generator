@@ -3,13 +3,14 @@ import type { AppConfig } from "./types.js";
 const config: AppConfig = {
   appName: "AFTMS Server",
   version: "0.0.1",
+  releaseDate: new Date().toISOString(),
   shortDescription: "Air force Flight Training Management System server",
   publisher: "Pegasus Techonologies",
   AppPublisherURL: "https://www.pegasustech.net",
   appId: "{{A6074E46-8A8D-4A69-B843-21454B59DC24}",
-  sourceFilesDir: "./bin/publish",
+  sourceFilesDir: "D:\\Divyansh Soni\\Codes\\pegasus-aftms\\server\\bin",
   mainExecutableInSourceDir: "./server.exe",
-  serverPort: "7001",
+  openSite: true,
 
   // This Decides where the application will be installed.
   installation: {

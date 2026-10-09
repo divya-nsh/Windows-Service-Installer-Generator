@@ -1,9 +1,10 @@
 import path from "path";
 import { cp, copyFile, mkdir, rm, writeFile } from "fs/promises";
-import { existsSync, fstat } from "fs";
+import { existsSync, readdirSync } from "fs";
 import config from "./config.js";
 import { spawn } from "node:child_process";
 import { styleText } from "util";
+import { promptConfirm, wait } from "./utils.js";
 
 /**
  * Out Structure:
@@ -15,7 +16,6 @@ import { styleText } from "util";
  *    - inno-conf.iss       <- Inno Setup script (paths inside are relative to this file)
  *    - Output/             <- final Setup.exe
  */
-
 const WIN_SW_BINARY_PATH = "./bin/WinSW-x64.exe";
 const INNO_ISCC_BINARY_PATH =
   process.env.ISCC_PATH ?? "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe";
@@ -55,6 +55,16 @@ console.log(styleText("blue", "Cleaning & Creating output directory..."));
 await rm(OUT_DESTINATION, { recursive: true, force: true });
 await mkdir(PUBLISH_DIR, { recursive: true });
 
+console.log("Following files will be copied to output directory:");
+console.log(readdirSync(PUBLISH_DIR));
+
+const confirm = await promptConfirm("Are you sure you want to continue?");
+
+if (!confirm) {
+  console.log(styleText("red", "Installation cancelled."));
+  process.exit(1);
+}
+
 console.log(styleText("blue", "Copying source files to output directory..."));
 // Copy the whole build folder (copyFile only works for single files).
 await cp(config.sourceFilesDir, PUBLISH_DIR, { recursive: true });
@@ -83,6 +93,10 @@ const serviceXmlContent = `<service>
   <executable>%BASE%\\${mainExecutableFilename}</executable>
   <workingdirectory>%BASE%</workingdirectory>
 
+  <!-- Runtime environment -->
+  <env name="NODE_ENV" value="production" />
+  <env name="RUNNING_AS_SERVICE" value="true" />
+
   <!-- Start automatically with Windows -->
   <startmode>Automatic</startmode>
 
@@ -108,9 +122,8 @@ console.log(
 );
 await writeFile(path.join(PUBLISH_DIR, serviceXMLFileName), serviceXmlContent);
 
-// Create Utility Scripts for Service Management
-
-for (const command of ["start", "stop", "restart", "uninstall", "status"]) {
+// Utility scripts for service management (need "Run as administrator")
+for (const command of ["start", "stop", "restart", "status"]) {
   await writeFile(
     path.join(PUBLISH_DIR, `${command}-service.cmd`),
     `${serviceExecutableFilename} ${command}\npause\n`,
@@ -121,11 +134,38 @@ for (const command of ["start", "stop", "restart", "uninstall", "status"]) {
 // Building Inno Setup Config File
 // ---------------------------------------------------------------------------------//
 
+// In Inno, "{" starts a constant, so a GUID must be written as "{{GUID}".
+const innoAppId =
+  config.appId.startsWith("{") && !config.appId.startsWith("{{")
+    ? `{${config.appId}`
+    : config.appId;
+
+// "Open site" feature: Start Menu shortcut + "Open in browser" checkbox on the
+// finish page. Both call the exe with --open-site, which reads the port from
+// config.json itself, so it keeps working if the port is changed later.
+const openSiteEnabled = Boolean(config.openSite);
+
+const openSiteIconsSection = openSiteEnabled
+  ? `[Icons]
+Name: "{group}\\Open ${config.appName}"; Filename: "{app}\\${mainExecutableFilename}"; Parameters: "--open-site"; WorkingDir: "{app}"; Flags: runminimized
+`
+  : "";
+
+const openSiteRunLine = openSiteEnabled
+  ? `Filename: "{app}\\${mainExecutableFilename}"; Parameters: "--open-site"; Description: "Open ${config.appName} in your browser"; Flags: postinstall skipifsilent runasoriginaluser nowait`
+  : "";
+
+// Without any [Icons] Inno shows FinishedLabelNoIcons instead of
+// FinishedLabel, so we set both to the same text.
+const finishedMessage = openSiteEnabled
+  ? `Setup has finished installing [name] on your computer.%n%nThe service is running. Use the "Open ${config.appName}" Start Menu shortcut to open it in your browser.`
+  : `Setup has finished installing [name] on your computer.%n%nThe service is running.`;
+
 // NOTE: relative paths in an .iss file resolve relative to the .iss file
 // itself (out/), so "publish\*" points at out/publish.
 const innoConfigFileContent = `
 [Setup]
-AppId=${config.appId}
+AppId=${innoAppId}
 AppName=${config.appName}
 AppVersion=${config.version}
 AppPublisher=${config.publisher}
@@ -135,8 +175,8 @@ ${config.AppPublisherURL ? `AppPublisherURL=${config.AppPublisherURL}` : ""}
 DefaultDirName=${config.installation.directory}
 DefaultGroupName=${config.appName}
 
-OutputDir=Output
-OutputBaseFilename=${config.outputBaseFilename.replace("{version}", config.version)}
+OutputDir=../dist
+OutputBaseFilename=${config.outputBaseFilename.replaceAll("{version}", config.version)}
 
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -153,14 +193,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "publish\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-[Icons]
-Name: "{group}\\Start Service"; Filename: "{app}\\${serviceExecutableFilename}"; Parameters: "start"; WorkingDir: "{app}"
-Name: "{group}\\Stop Service"; Filename: "{app}\\${serviceExecutableFilename}"; Parameters: "stop"; WorkingDir: "{app}"
-Name: "{group}\\Restart Service"; Filename: "{app}\\${serviceExecutableFilename}"; Parameters: "restart"; WorkingDir: "{app}"
-
+${openSiteIconsSection}
 [Run]
 Filename: "{app}\\${serviceExecutableFilename}"; Parameters: "install"; Flags: runhidden waituntilterminated; StatusMsg: "Installing service..."
 Filename: "{app}\\${serviceExecutableFilename}"; Parameters: "start"; Flags: runhidden waituntilterminated; StatusMsg: "Starting service..."
+${openSiteRunLine}
 
 [UninstallRun]
 Filename: "{app}\\${serviceExecutableFilename}"; Parameters: "stop"; Flags: runhidden waituntilterminated; RunOnceId: "StopService"
@@ -186,11 +223,25 @@ begin
 end;
 
 [Messages]
-FinishedLabel=Setup has finished installing [name] on your computer.%n%nThe service is running with these defaults:%n%nServer port: ${config.serverPort}%nBase URL: http://localhost:${config.serverPort}
+FinishedLabel=${finishedMessage}
+FinishedLabelNoIcons=${finishedMessage}
 `;
 
 console.log(styleText("blue", "Generating Inno config file..."));
 await writeFile(INNO_CONFIG_FILE_PATH, innoConfigFileContent);
+
+await writeFile(
+  path.join(PUBLISH_DIR, "install-info.json"),
+  JSON.stringify(
+    {
+      version: config.version,
+      releaseDate: config.releaseDate,
+      buildTime: new Date().toISOString(),
+    },
+    null,
+    2,
+  ),
+);
 
 // ---------------------------------------------------------------------------------//
 // Compiling Inno Setup Config File
@@ -226,12 +277,9 @@ function innoCompile() {
     });
   });
 }
-console.log(styleText("blue", "Running Inno Compile...\n"));
 
-// const now = performance.now();
+console.log(styleText("blue", "Running Inno Compile...\n"));
 
 await innoCompile();
 
-// const seconds = now / 1000;
-
-console.log(styleText("greenBright", `🎉 Installer Succefully Generated`));
+console.log(styleText("greenBright", `🎉 Installer Successfully Generated`));
